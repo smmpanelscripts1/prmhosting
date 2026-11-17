@@ -1,0 +1,37 @@
+info:
+  name: "PRM Hosting"
+  identifier: "prmhosting"
+  description: "Plesk-benzeri hosting köprüsü: domain/SSL, WordPress+DB, cron, stack status."
+  flags: ""
+  version: "1.0.0"
+  target: "beta-2026-08"
+  author: "Peto"
+  icon: ""
+  website: ""
+
+admin:
+  view: "view.blade.php"
+  controller: ""
+  css: "admin.css"
+  wrapper: "admin/wrapper.blade.php"
+
+dashboard:
+  css: ""
+  wrapper: "dashboard/wrapper.blade.php"
+  components: ""
+
+data:
+  directory: ""
+  public: ""
+  console: ""
+
+requests:
+  views: ""
+  app: ""
+  routers:
+    application: ""
+    client: "routes/client.php"
+    web: "routes/web.php"
+
+database:
+  migrations: ""
