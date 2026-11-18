@@ -1,0 +1,4 @@
+Navigation:
+  Routes:
+    - { Name: "Günlükler", Path: "/hosting-logs", Type: "server", Component: "HostingLogs", AdminOnly: "false" }
+    - { Name: "Site Firewall", Path: "/hosting-firewall", Type: "server", Component: "HostingFirewall", AdminOnly: "false" }

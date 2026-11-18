@@ -176,6 +176,211 @@ class HostingService
         return self::getCron($server->fresh(['variables']));
     }
 
+    public static function firewallDefaults(): array
+    {
+        return [
+            'enabled' => false,
+            'mode' => 'allow_all', // allow_all | whitelist | blacklist
+            'rules' => [],
+            'snippet' => '/nginx/snippets/prm-firewall.conf',
+            'meta' => '/.prmhosting/firewall.json',
+            'updated_at' => 0,
+            'note' => 'Nginx allow/deny — host SecGuard firewall ile karıştırma.',
+        ];
+    }
+
+    public static function normalizeFirewallIp(string $raw): ?string
+    {
+        $raw = trim($raw);
+        if ($raw === '') {
+            return null;
+        }
+        if (strpos($raw, '/') !== false) {
+            [$net, $bits] = array_pad(explode('/', $raw, 2), 2, '');
+            $net = trim($net);
+            $bits = (int) $bits;
+            if (filter_var($net, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+                return ($bits >= 8 && $bits <= 32) ? ($net . '/' . $bits) : null;
+            }
+            if (filter_var($net, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
+                return ($bits >= 32 && $bits <= 128) ? ($net . '/' . $bits) : null;
+            }
+
+            return null;
+        }
+        $ip = filter_var($raw, FILTER_VALIDATE_IP);
+
+        return $ip !== false ? $ip : null;
+    }
+
+    public static function getFirewall(Server $server): array
+    {
+        $defaults = self::firewallDefaults();
+        try {
+            $raw = app(DaemonFileRepository::class)->setServer($server)->getContent($defaults['meta'], 65536);
+            $parsed = json_decode((string) $raw, true);
+            if (!is_array($parsed)) {
+                return $defaults;
+            }
+            $mode = (string) ($parsed['mode'] ?? 'allow_all');
+            if (!in_array($mode, ['allow_all', 'whitelist', 'blacklist'], true)) {
+                $mode = 'allow_all';
+            }
+            $rules = [];
+            foreach ((array) ($parsed['rules'] ?? []) as $row) {
+                if (!is_array($row)) {
+                    continue;
+                }
+                $ip = self::normalizeFirewallIp((string) ($row['ip'] ?? ''));
+                if ($ip === null) {
+                    continue;
+                }
+                $rules[] = [
+                    'ip' => $ip,
+                    'note' => mb_substr((string) ($row['note'] ?? ''), 0, 120),
+                ];
+            }
+
+            return [
+                'enabled' => !empty($parsed['enabled']),
+                'mode' => $mode,
+                'rules' => $rules,
+                'snippet' => $defaults['snippet'],
+                'meta' => $defaults['meta'],
+                'updated_at' => (int) ($parsed['updated_at'] ?? 0),
+                'note' => $defaults['note'],
+            ];
+        } catch (Throwable $e) {
+            return $defaults;
+        }
+    }
+
+    public static function putFirewall(Server $server, array $input): array
+    {
+        $mode = (string) ($input['mode'] ?? 'allow_all');
+        if (!in_array($mode, ['allow_all', 'whitelist', 'blacklist'], true)) {
+            $mode = 'allow_all';
+        }
+        $rules = [];
+        $seen = [];
+        foreach ((array) ($input['rules'] ?? []) as $row) {
+            $rawIp = is_array($row) ? (string) ($row['ip'] ?? '') : (string) $row;
+            $ip = self::normalizeFirewallIp($rawIp);
+            if ($ip === null || isset($seen[$ip])) {
+                continue;
+            }
+            $seen[$ip] = true;
+            $note = is_array($row) ? mb_substr((string) ($row['note'] ?? ''), 0, 120) : '';
+            $rules[] = ['ip' => $ip, 'note' => $note];
+            if (count($rules) >= 200) {
+                break;
+            }
+        }
+        $enabled = !empty($input['enabled']);
+        if ($enabled && $mode === 'whitelist' && $rules === []) {
+            throw new \InvalidArgumentException('Whitelist boş olamaz — kendini kilitlememek için en az bir IP ekle.');
+        }
+
+        $cfg = [
+            'enabled' => $enabled,
+            'mode' => $mode,
+            'rules' => $rules,
+            'updated_at' => time(),
+        ];
+        self::writeFile($server, '/.prmhosting/firewall.json', json_encode($cfg, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
+        self::writeFile($server, '/nginx/snippets/prm-firewall.conf', self::renderFirewallSnippet($cfg));
+        $includes = self::ensureFirewallIncludes($server);
+
+        $out = self::getFirewall($server);
+        $out['includes'] = $includes;
+        $out['restart_hint'] = 'Nginx reload için siteyi yeniden başlat (Restart).';
+
+        return $out;
+    }
+
+    public static function renderFirewallSnippet(array $cfg): string
+    {
+        $lines = [
+            '# Managed by prmhosting — do not edit by hand',
+            '# Site firewall (allow / deny). Empty when disabled or allow_all.',
+        ];
+        if (empty($cfg['enabled']) || ($cfg['mode'] ?? '') === 'allow_all') {
+            $lines[] = '# passthrough';
+
+            return implode("\n", $lines) . "\n";
+        }
+        $rules = is_array($cfg['rules'] ?? null) ? $cfg['rules'] : [];
+        if (($cfg['mode'] ?? '') === 'whitelist') {
+            foreach ($rules as $row) {
+                $ip = is_array($row) ? (string) ($row['ip'] ?? '') : (string) $row;
+                if ($ip !== '') {
+                    $lines[] = 'allow ' . $ip . ';';
+                }
+            }
+            $lines[] = 'deny all;';
+
+            return implode("\n", $lines) . "\n";
+        }
+        // blacklist
+        foreach ($rules as $row) {
+            $ip = is_array($row) ? (string) ($row['ip'] ?? '') : (string) $row;
+            if ($ip !== '') {
+                $lines[] = 'deny ' . $ip . ';';
+            }
+        }
+
+        return implode("\n", $lines) . "\n";
+    }
+
+    public static function ensureFirewallIncludes(Server $server): array
+    {
+        $needle = 'nginx/snippets/prm-firewall.conf';
+        $includeLine = 'include /home/container/nginx/snippets/prm-firewall.conf;';
+        $touched = [];
+        $files = app(DaemonFileRepository::class)->setServer($server);
+        $candidates = [];
+        try {
+            $listing = $files->getDirectory('/nginx/conf.d');
+            foreach ((array) $listing as $row) {
+                $name = is_array($row) ? (string) ($row['name'] ?? '') : '';
+                if ($name !== '' && str_ends_with($name, '.conf') && !str_contains($name, '.example')) {
+                    $candidates[] = '/nginx/conf.d/' . $name;
+                }
+            }
+        } catch (Throwable $e) {
+            $candidates = ['/nginx/conf.d/default.conf'];
+        }
+        if ($candidates === []) {
+            $candidates = ['/nginx/conf.d/default.conf'];
+        }
+        foreach ($candidates as $path) {
+            try {
+                $content = (string) $files->getContent($path, 512000);
+            } catch (Throwable $e) {
+                continue;
+            }
+            if (str_contains($content, $needle)) {
+                $touched[] = ['path' => $path, 'status' => 'already'];
+                continue;
+            }
+            // Insert after real_ip_recursive or charset, else after opening server {
+            $insert = "\n    " . $includeLine . "\n";
+            if (preg_match('/real_ip_recursive\s+on\s*;/', $content)) {
+                $content = preg_replace('/real_ip_recursive\s+on\s*;/', '$0' . $insert, $content, 1);
+            } elseif (preg_match('/charset\s+utf-8\s*;/', $content)) {
+                $content = preg_replace('/charset\s+utf-8\s*;/', '$0' . $insert, $content, 1);
+            } elseif (preg_match('/server\s*\{/', $content)) {
+                $content = preg_replace('/server\s*\{/', '$0' . $insert, $content, 1);
+            } else {
+                $content .= "\n" . $includeLine . "\n";
+            }
+            self::writeFile($server, $path, $content);
+            $touched[] = ['path' => $path, 'status' => 'patched'];
+        }
+
+        return $touched;
+    }
+
     public static function installWordpress(Server $server, ?string $dbName = null): array
     {
         $files = app(DaemonFileRepository::class)->setServer($server);
@@ -275,7 +480,13 @@ class HostingService
         $name = addslashes((string) $db['database']);
         $user = addslashes((string) $db['username']);
         $pass = addslashes((string) $db['password']);
-        $host = addslashes((string) ($db['host'] ?: '127.0.0.1'));
+        // Wings containers are on pterodactyl_nw; compose service alias "database" is not
+        // resolvable there. Prefer explicit hosting host or the shared network DNS name.
+        $rawHost = (string) ($db['host'] ?: '127.0.0.1');
+        if ($rawHost === 'database' || $rawHost === '127.0.0.1' || $rawHost === 'localhost') {
+            $rawHost = (string) (env('HOSTING_DB_HOST') ?: 'peto-database-1');
+        }
+        $host = addslashes($rawHost);
         $port = (int) ($db['port'] ?: 3306);
         $hostPort = $port && $port !== 3306 ? "{$host}:{$port}" : $host;
         $keys = [];

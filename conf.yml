@@ -1,9 +1,9 @@
 info:
   name: "PRM Hosting"
   identifier: "prmhosting"
-  description: "Plesk-benzeri hosting köprüsü: domain/SSL, WordPress+DB, cron, stack status."
+  description: "Plesk-benzeri hosting köprüsü: domain/SSL, WordPress+DB, cron, site firewall, log browser, stack status."
   flags: ""
-  version: "1.0.0"
+  version: "1.3.0"
   target: "beta-2026-08"
   author: "Peto"
   icon: ""
@@ -18,7 +18,7 @@ admin:
 dashboard:
   css: ""
   wrapper: "dashboard/wrapper.blade.php"
-  components: ""
+  components: "components"
 
 data:
   directory: ""
