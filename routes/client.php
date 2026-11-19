@@ -12,6 +12,7 @@ if (!is_dir($lib)) {
 require_once $lib . '/Settings.php';
 require_once $lib . '/HostingService.php';
 require_once $lib . '/LogBrowser.php';
+require_once $lib . '/ComposerManager.php';
 
 Route::middleware([AuthenticateServerAccess::class])->group(function () {
     Route::get('/servers/{server}/hosting/stack', function (Server $server) {
@@ -155,6 +156,52 @@ Route::middleware([AuthenticateServerAccess::class])->group(function () {
     Route::get('/servers/{server}/hosting/logs/sources', function (Server $server) {
         try {
             return response()->json(['sources' => \PrmHosting\LogBrowser::catalog($server)]);
+        } catch (\Throwable $e) {
+            return response()->json(['error' => $e->getMessage()], 500);
+        }
+    });
+
+    Route::get('/servers/{server}/hosting/composer', function (Server $server) {
+        try {
+            return response()->json(\PrmHosting\ComposerManager::status($server));
+        } catch (\Throwable $e) {
+            return response()->json(['error' => $e->getMessage()], 500);
+        }
+    });
+
+    Route::put('/servers/{server}/hosting/composer', function (Request $request, Server $server) {
+        try {
+            if ($request->exists('enabled')) {
+                \PrmHosting\ComposerManager::setEnabled($server, $request->boolean('enabled'));
+            }
+            if ($request->filled('mode')) {
+                \PrmHosting\ComposerManager::setMode($server, (string) $request->input('mode'));
+            }
+            if ($request->exists('composer_json')) {
+                \PrmHosting\ComposerManager::putComposerJson($server, $request->input('composer_json'));
+            }
+
+            return response()->json(['ok' => true, 'composer' => \PrmHosting\ComposerManager::status($server)]);
+        } catch (\InvalidArgumentException $e) {
+            return response()->json(['error' => $e->getMessage()], 422);
+        } catch (\Throwable $e) {
+            return response()->json(['error' => $e->getMessage()], 500);
+        }
+    });
+
+    Route::post('/servers/{server}/hosting/composer/job', function (Request $request, Server $server) {
+        try {
+            $result = \PrmHosting\ComposerManager::queueJob(
+                $server,
+                (string) $request->input('action', 'install'),
+                [
+                    'packages' => $request->input('packages', []),
+                ]
+            );
+
+            return response()->json(['ok' => true] + $result);
+        } catch (\InvalidArgumentException $e) {
+            return response()->json(['error' => $e->getMessage()], 422);
         } catch (\Throwable $e) {
             return response()->json(['error' => $e->getMessage()], 500);
         }
